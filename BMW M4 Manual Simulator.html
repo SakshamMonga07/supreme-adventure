@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BMW M4 Manual Simulator</title>
+<style>
+:root{color-scheme:dark;--bg:#080b10;--p:#10151d;--l:#222c3b;--t:#e8eef7;--m:#7f8fa5;--b:#1c8cff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+body{height:100%;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--t);font:12px/1.4 system-ui,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden;user-select:none;touch-action:none}
+#view{flex:1 1 0;min-height:160px;position:relative;overflow:hidden}
+#world{position:absolute;left:0;top:0;width:100%;height:100%;display:block;background:#233b27}
+.hud{position:absolute;background:rgba(8,11,16,.8);border:1px solid var(--l);border-radius:8px;padding:8px 10px}
+#lesson{left:8px;top:8px;max-width:270px}#lesson b{color:var(--b)}
+#msg{left:50%;top:10px;transform:translateX(-50%);opacity:0;transition:opacity .25s;text-align:center;max-width:56%;border-color:var(--b)}
+#info{right:8px;top:8px;max-width:340px;display:none;font-size:11px}
+#panel{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;padding:8px 10px;background:var(--p);border-top:1px solid var(--l);align-items:center}
+#dash{width:100%;height:auto;max-height:190px;border-radius:10px;background:#070a0f}
+#peds{display:flex;gap:8px}
+.ped{position:relative;width:46px;height:120px;border:1px solid var(--l);border-radius:8px;background:#0a0e14;overflow:hidden;cursor:ns-resize}
+.ped i{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(0deg,#0b5bb8,var(--b))}
+.ped b{position:absolute;top:4px;width:100%;text-align:center;font-size:9px;letter-spacing:.06em}
+.ped span{position:absolute;bottom:4px;width:100%;text-align:center;font-weight:700}
+#side{display:flex;flex-direction:column;gap:6px;align-items:center}
+#lever{width:160px;height:130px;background:#0a0e14;border:1px solid var(--l);border-radius:8px;cursor:pointer}
+.bt{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;max-width:170px}
+button{background:#18212e;color:var(--t);border:1px solid var(--l);border-radius:6px;padding:6px 9px;font:inherit;font-weight:600;cursor:pointer}
+button.on{background:var(--b);border-color:var(--b)}
+@media(max-width:760px){#panel{grid-template-columns:1fr auto}#dash{grid-column:1/3}#lesson{max-width:200px;font-size:11px}}
+</style></head><body>
+<div id="view"><canvas id="world"></canvas>
+<div class="hud" id="lesson"></div><div class="hud" id="msg"></div>
+<div class="hud" id="info"><b>Physics model</b><br>Engine: Ie·dω/dt = T<sub>eng</sub>(rpm, throttle) − T<sub>clutch</sub>. Torque follows a 650 Nm curve minus friction and pumping loss (engine braking); idle control holds ~900 rpm.<br>Clutch: T<sub>clutch</sub> = T<sub>cap</sub>(pedal)·tanh(slip/6), capacity up to 900 Nm with a bite point near 60% pedal travel.<br>Wheels: F = T<sub>clutch</sub>·gear·final/r; m·dv/dt = F − rolling(0.015·m·g) − ½ρCdAv² − brake. Stall below 420 rpm.<br><i>Real M4 values used:</i> 6MT ratios, 3.15 final drive, ~1.7 t, 650 Nm. <i>Simplified:</i> torque-curve shape, engine inertia, clutch capacity, idle control, tyre grip, steering model.<br><b>Keys</b> W gas · S brake · Space clutch (hold Shift to release it slowly) · A/D steer · 1-6, N, R gears · E start/stop · C camera. Drag pedals with the mouse; click the lever.</div></div>
+<div id="panel"><canvas id="dash" width="640" height="200"></canvas>
+<div id="peds"><div class="ped" data-k="clu"><i></i><b>CLUTCH</b><span>0%</span></div><div class="ped" data-k="brk"><i></i><b>BRAKE</b><span>0%</span></div><div class="ped" data-k="thr"><i></i><b>ACCEL</b><span>0%</span></div></div>
+<div id="side"><canvas id="lever" width="160" height="130"></canvas><div class="bt"><button id="bi">IGN</button><button id="bs">START</button><button id="bx">STOP</button><button id="bc">CAM</button><button id="bt" class="on">TRAIN</button><button id="bn">INFO</button><button id="bl">◀</button><button id="br">▶</button></div></div></div>
+<script>
+const $=i=>document.getElementById(i),cl=(v,a,b)=>Math.min(b,Math.max(a,v)),lp=(a,b,t)=>a+(b-a)*t,rnd=n=>{const s=Math.sin(n*127.1)*43758.5;return s-Math.floor(s)};
+const W=$('world'),X=W.getContext('2d'),D=$('dash').getContext('2d'),Z=$('lever').getContext('2d');
+// ---- vehicle spec (M4 ratios real, rest simplified) ----
+const C={M:1725,Ie:.25,idle:900,lim:7500,T:650,r:.34,fd:3.15,g:[0,4.11,2.32,1.54,1.18,1,.85],rev:3.9,cap:900,L:2.85};
+const TC=[[0,.3],[800,.4],[1850,1],[5500,1],[7200,.8],[7600,.5]];
+const curve=r=>{for(let i=1;i<6;i++)if(r<=TC[i][0])return lp(TC[i-1][1],TC[i][1],(r-TC[i-1][0])/(TC[i][0]-TC[i-1][0]));return .5};
+const capf=()=>C.cap*Math.pow(cl((1-S.clu-.15)/.5,0,1),1.5);
+const S={ign:0,run:0,crank:0,we:0,v:0,x:5.3,y:0,h:0,st:0,thr:0,brk:0,clu:0,gr:0,temp:25,fuel:59,dist:0,hit:0,cam:0,ov:0};
+const K={},P={},TR={on:1,i:0};
+const TF=[[1.75,11,1,'#b8b8c0'],[1.75,16,1,'#7a2a2a'],[-1.75,15,-1,'#d8d8d8'],[-1.75,19,-1,'#2a6a4a'],[-1.75,13,-1,'#caa33a']].map((a,i)=>({x:a[0],s:a[1],d:a[2],c:a[3],y:-70-i*55}));
+let mt;function fb(t){const m=$('msg');m.textContent=t;m.style.opacity=1;clearTimeout(mt);mt=setTimeout(()=>m.style.opacity=0,4200)}
+// ---- audio ----
+let A,N={};
+function aud(){if(A){A.resume();return}A=new(window.AudioContext||webkitAudioContext)();const m=A.createGain();m.gain.value=.5;m.connect(A.destination);N.m=m;
+N.f=A.createBiquadFilter();N.f.type='lowpass';N.g=A.createGain();N.g.gain.value=0;N.f.connect(N.g);N.g.connect(m);
+N.o=[['sawtooth',1,.5],['square',2,.15],['sawtooth',.5,.3]].map(([t,k,v])=>{const o=A.createOscillator(),g=A.createGain();o.type=t;g.gain.value=v;o.connect(g);g.connect(N.f);o.start();o.k=k;return o});
+const b=A.createBuffer(1,A.sampleRate,A.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+const s=A.createBufferSource();s.buffer=b;s.loop=true;N.bp=A.createBiquadFilter();N.bp.type='bandpass';N.tg=A.createGain();N.tg.gain.value=0;s.connect(N.bp);N.bp.connect(N.tg);N.tg.connect(m);s.start()}
+function snd(f,d,t='sine',v=.3){if(!A)return;const o=A.createOscillator(),g=A.createGain(),n=A.currentTime;o.type=t;o.frequency.setValueAtTime(f,n);o.frequency.exponentialRampToValueAtTime(Math.max(20,f*.4),n+d);g.gain.setValueAtTime(v,n);g.gain.exponentialRampToValueAtTime(.001,n+d);o.connect(g);g.connect(N.m);o.start(n);o.stop(n+d)}
+function audUpd(){if(!A)return;const t=A.currentTime,r=S.we*9.549,on=S.run||S.crank>0,f=Math.max(8,r/60*3);
+N.o.forEach(o=>o.frequency.setTargetAtTime(f*o.k,t,.03));N.f.frequency.setTargetAtTime(350+r*.25+S.thr*1800,t,.05);
+const pl=S.crank>0?.5+.5*Math.sin(t*40):1;N.g.gain.setTargetAtTime(on?(S.run?.1+.22*S.thr+r/60000:.12)*pl:0,t,.05);
+const sp=Math.abs(S.v);N.bp.frequency.setTargetAtTime(300+sp*25,t,.1);N.tg.gain.setTargetAtTime(Math.min(sp/35,1)*.2,t,.1)}
+// ---- controls ----
+function setGear(g){if(g===S.gr)return;if(S.clu<.8){snd(140,.25,'sawtooth',.3);snd(95,.3,'square',.2);fb('Gear rejected: press the clutch fully (Space) before shifting');return}S.gr=g;snd(900,.06,'square',.15);snd(200,.1,'triangle',.3)}
+function start(){aud();if(S.run||S.crank||S.fuel<=0)return;if(S.gr!==0&&S.clu<.8){fb('Press the clutch (Space) or select neutral before starting');return}S.ign=1;S.crank=.001}
+function stop(){S.run=0;S.crank=0;S.ign=0}
+function stall(){S.run=0;snd(90,.5,'sawtooth',.35);fb((S.gr!==0&&S.clu<.35?'STALLED: clutch released too fast for this gear. Use 1st and release slowly past the bite point.':S.gr!==0?'STALLED: press the clutch when slowing in gear.':'Engine stopped.')+' Clutch in, then E to restart.')}
+addEventListener('keydown',e=>{aud();if(e.repeat)return;const c=e.code;K[c]=1;if(/^Digit[1-6]$/.test(c))setGear(+c[5]);else if(c==='KeyN')setGear(0);else if(c==='KeyR')setGear(-1);else if(c==='KeyE')(S.run||S.crank)?stop():start();else if(c==='KeyC')S.cam^=1;if(c==='Space')e.preventDefault()});
+addEventListener('keyup',e=>K[e.code]=0);addEventListener('blur',()=>{for(const k in K)K[k]=0});
+const PD=[...document.querySelectorAll('.ped')];
+PD.forEach(p=>{const k=p.dataset.k,set=e=>{const r=p.getBoundingClientRect();P[k]=cl(1-(e.clientY-r.top)/r.height,0,1)};p.onpointerdown=e=>{aud();p.setPointerCapture(e.pointerId);set(e)};p.onpointermove=e=>{if(P[k]!=null)set(e)};p.onpointerup=p.onpointercancel=()=>P[k]=null});
+const SL={'-1':[26,26],1:[62,26],2:[62,104],3:[98,26],4:[98,104],5:[134,26],6:[134,104],0:[80,65]};
+$('lever').onpointerdown=e=>{aud();const el=$('lever'),r=el.getBoundingClientRect(),x=(e.clientX-r.left)*160/r.width,y=(e.clientY-r.top)*130/r.height;let b=null,bd=1e9;for(const g in SL){const d=Math.hypot(SL[g][0]-x,SL[g][1]-y);if(d<bd){bd=d;b=+g}}if(bd<30)setGear(b)};
+$('bi').onclick=()=>{aud();S.ign?stop():S.ign=1};$('bs').onclick=start;$('bx').onclick=stop;$('bc').onclick=()=>S.cam^=1;$('bt').onclick=()=>TR.on^=1;
+$('bn').onclick=()=>{const i=$('info');i.style.display=i.style.display==='block'?'none':'block'};
+[['bl','KeyA'],['br','KeyD']].forEach(([b,k])=>{const e=$(b);e.onpointerdown=()=>K[k]=1;e.onpointerup=e.onpointerleave=()=>K[k]=0});
+// ---- training ----
+const TS=[['Start the engine','Stay in Neutral (or hold the clutch), then press E or START.',()=>S.run],
+['Find neutral and rev','Lever centred on N. Hold W above 2500 rpm: free revving with no load.',()=>S.run&&S.gr===0&&S.we*9.549>2500],
+['Select 1st gear','Hold the clutch (Space) fully in, then click 1 on the lever or press 1.',()=>S.gr===1&&S.clu>.8],
+['Find the bite point','Release the clutch slowly (hold Shift, or drag the pedal). At 40-60% the car starts to creep.',()=>S.run&&S.gr===1&&S.v>.4],
+['Move off smoothly','Add a little throttle, release the clutch fully, reach 15 km/h.',()=>S.run&&S.gr===1&&S.clu<.1&&S.v>4.1],
+['Shift to 2nd','Clutch in, select 2, release smoothly, reach 25 km/h.',()=>S.run&&S.gr===2&&S.clu<.1&&S.v>6.9],
+['Downshift','Brake below 20 km/h, clutch in, select 1st, release smoothly.',()=>S.run&&S.gr===1&&S.clu<.1&&S.v>1&&S.v<5.5],
+['Stop safely','Brake to a halt, then press the clutch (or N) so the engine does not stall.',()=>S.run&&S.v===0&&S.brk>.2&&(S.clu>.8||S.gr===0)],
+['Reverse','Clutch in, select R, ease the clutch out and reverse about 5 m.',()=>S.run&&S.gr===-1&&S.v<-1.4]];
+// ---- physics ----
+function upd(dt){
+const rt=(k,u,d,key)=>{if(P[k]!=null){S[k]=P[k];return}const t=K[key]?1:0;S[k]=t>S[k]?Math.min(t,S[k]+u*dt):Math.max(t,S[k]-d*dt)};
+rt('thr',2.8,5,'KeyW');rt('brk',4,6,'KeyS');rt('clu',7,(K.ShiftLeft||K.ShiftRight)?.35:1.4,'Space');
+const sT=(K.KeyD?1:0)-(K.KeyA?1:0),sr=(sT?2.5:4)*dt;S.st+=cl(sT-S.st,-sr,sr);
+if(!dt)return;
+const n=16,h=dt/n,R=S.gr?(S.gr>0?C.g[S.gr]:-C.rev)*C.fd:0,off=Math.abs(S.x)>3.5&&!(S.x>3.5&&S.x<11&&S.y>-22&&S.y<14),Fs=C.M*9.81*(.015*(off?4:1)+S.brk);
+for(let i=0;i<n;i++){const r=S.we*9.549,th=S.thr;let Te;
+ if(S.run)Te=(r>C.lim?0:th*C.T*curve(r))+clamp1(55+(C.idle-r)*.8)*(1-th)-(10+r*.004)-(1-th)*(22+r*.012);else Te=-(35+r*.01);
+ const Tc=R?capf()*Math.tanh((S.we-S.v/C.r*R)/6):0;
+ S.we=Math.max(0,S.we+(Te-Tc)/C.Ie*h);
+ const F=R?Tc*R/C.r:0,Fd=.5*1.2*.35*2.2*S.v*Math.abs(S.v);let nv;
+ if(S.v===0&&Math.abs(F)<=Fs)nv=0;else{const d=S.v?Math.sign(S.v):Math.sign(F);nv=S.v+(F-d*Fs-Fd)/(C.M*1.03)*h;if(S.v&&Math.sign(nv)!==Math.sign(S.v)&&Math.abs(F)<=Fs)nv=0}
+ S.v=nv}
+function clamp1(v){return cl(v,0,220)}
+if(S.crank>0){S.crank+=dt;S.we=lp(S.we,28+Math.sin(S.crank*35)*5,Math.min(1,dt*8));if(S.crank>.9){S.crank=0;S.run=1;S.we=96;snd(220,.3,'sawtooth',.25)}}
+const r=S.we*9.549;
+if(S.run){S.fuel=Math.max(0,S.fuel-dt*(.0006+S.thr*r/7200*.012));if(r<420||!S.fuel)stall()}
+S.temp+=((S.run?78+r/7200*28+S.thr*8-Math.min(Math.abs(S.v),30)*.5:20)-S.temp)*dt*.03;
+if(r>7500&&!S.ov){S.ov=1;fb('Over-rev! Shift up or lift off the throttle')}if(r<7000)S.ov=0;
+const dl=S.st*.55/(1+Math.abs(S.v)/9);S.h+=S.v/C.L*Math.tan(dl)*dt;S.x+=Math.sin(S.h)*S.v*dt;S.y-=Math.cos(S.h)*S.v*dt;S.dist+=S.v*dt;S.hit-=dt;
+for(const t of TF){t.y-=t.d*t.s*dt;if(t.y>S.y+70)t.y=S.y-200-Math.random()*100;if(t.d>0&&t.y<S.y-320)t.y=S.y+60;
+ if(S.hit<=0&&Math.abs(t.x-S.x)<1.9&&Math.abs(t.y-S.y)<4.6){S.hit=1.5;S.v*=.15;S.y+=(S.y>t.y?.6:-.6);snd(70,.4,'sawtooth',.5);fb('Collision! Watch the traffic.')}}
+if(TR.on&&TS[TR.i]&&TS[TR.i][2]()){TR.i++;snd(1200,.15,'sine',.2)}}
+// ---- rendering ----
+function scen(i,sd){const r=rnd(i*3+(sd>0?1:2)),q=rnd(i*7+sd);if(r<.2)return null;return{x:sd*(13+q*16),y:i*9+rnd(i)*6,b:r>.88,s:r>.88?5+q*5:1+q*1.2}}
+function car(x,y,h,c,o){X.save();X.translate(x,y);X.rotate(h);
+const wh=(wx,wy,a)=>{X.save();X.translate(wx,wy);X.rotate(a);X.fillStyle='#0c0c0e';X.fillRect(-.14,-.36,.28,.72);X.fillStyle='#4a505a';X.fillRect(-.14,(S.dist%.36)-.21,.28,.06);X.restore()};
+wh(-.88,-1.45,o.s||0);wh(.88,-1.45,o.s||0);wh(-.88,1.45,0);wh(.88,1.45,0);
+X.fillStyle=c;X.beginPath();X.roundRect(-.95,-2.4,1.9,4.8,.5);X.fill();
+X.fillStyle='rgba(255,255,255,.14)';X.fillRect(-.3,-2.3,.6,1.4);
+X.fillStyle='#0b1018';X.beginPath();X.roundRect(-.78,-.9,1.56,2.1,.35);X.fill();
+X.fillStyle=c;X.beginPath();X.roundRect(-.62,-.45,1.24,1.3,.3);X.fill();
+X.fillStyle=c;X.fillRect(-1.08,-.8,.16,.3);X.fillRect(.92,-.8,.16,.3);
+X.fillStyle='#050505';X.fillRect(-.42,-2.4,.3,.14);X.fillRect(.12,-2.4,.3,.14);
+X.fillStyle=o.hd?'#fff6c0':'#aab';X.fillRect(-.88,-2.38,.4,.12);X.fillRect(.48,-2.38,.4,.12);
+X.fillStyle=o.br?'#ff2a2a':'#7a1010';X.fillRect(-.9,2.28,.6,.1);X.fillRect(.3,2.28,.6,.1);X.restore()}
+function topView(){const w=W.width,h=W.height,s=h/30,vw=w/s,vh=h/s,x0=S.x-vw/2-2,y0=S.y-vh/2-2,hw=vw+4,hh=vh+4;
+X.save();X.translate(w/2,h/2);X.scale(s,s);X.translate(-S.x,-S.y);
+X.fillStyle='#233b27';X.fillRect(x0,y0,hw,hh);
+X.fillStyle='#2a2e35';X.fillRect(-3.5,y0,7,hh);X.fillStyle='#e6e9ee';X.fillRect(-3.4,y0,.12,hh);X.fillRect(3.28,y0,.12,hh);
+X.fillStyle='#e6c84a';for(let yy=Math.floor(y0/8)*8;yy<y0+hh;yy+=8)X.fillRect(-.06,yy,.12,4);
+X.fillStyle='#3a3f47';X.fillRect(3.5,-22,7.5,36);X.fillStyle='#cfd6df';for(const lx of[3.9,6.6,9.3])X.fillRect(lx-.05,-22,.1,36);for(let yy=-22;yy<=14;yy+=5.6)X.fillRect(3.9,yy-.05,5.5,.1);
+X.font='1.3px system-ui';X.fillStyle='#8fb4e8';X.fillText('PARKING',4.5,-23);
+for(let i=Math.floor(y0/9)-2;i<(y0+hh)/9+2;i++)for(const sd of[-1,1]){const o=scen(i,sd);if(!o||Math.abs(o.x-S.x)>vw/2+8)continue;
+ if(o.b){X.fillStyle='#4a5362';X.fillRect(o.x-o.s/2,o.y-o.s/2,o.s,o.s*1.3);X.fillStyle='#5c677a';X.fillRect(o.x-o.s/2+.6,o.y-o.s/2+.6,o.s-1.2,o.s*1.3-1.2)}
+ else{X.fillStyle='#1f5a2c';X.beginPath();X.arc(o.x,o.y,o.s,0,7);X.fill();X.fillStyle='#2d7a3b';X.beginPath();X.arc(o.x-.2,o.y-.2,o.s*.6,0,7);X.fill()}}
+for(const t of TF)car(t.x,t.y,t.d>0?0:Math.PI,t.c,{hd:1,br:t.d>0});
+car(S.x,S.y,S.h,'#1b5fb0',{s:S.st*.5,br:S.brk>.05,hd:S.ign});X.restore()}
+function cock(){const w=W.width,h=W.height,hz=h*.45,f=h,ch=1.15,co=Math.cos(S.h),si=Math.sin(S.h);
+let g=X.createLinearGradient(0,0,0,hz);g.addColorStop(0,'#16314f');g.addColorStop(1,'#7fa6c8');X.fillStyle=g;X.fillRect(0,0,w,hz);X.fillStyle='#233b27';X.fillRect(0,hz,w,h-hz);
+const pr=(px,py)=>{const dx=px-S.x,dy=S.y-py,fw=dy*co+dx*si,la=dx*co-dy*si;return fw>.4?{x:w/2+la/fw*f,y:hz+ch*f/fw,k:f/fw}:null};
+const qd=(a,b,c,d,col)=>{X.fillStyle=col;X.beginPath();X.moveTo(a.x,a.y);X.lineTo(b.x,b.y);X.lineTo(c.x,c.y);X.lineTo(d.x,d.y);X.fill()};
+const st=[[-3.5,3.5,'#2a2e35',1],[-3.4,-3.28,'#e6e9ee',1],[3.28,3.4,'#e6e9ee',1],[-.07,.07,'#e6c84a',2]];
+for(let d=170;d>-4;d-=2){const ya=S.y-d,yb=ya+2;for(const[s1,s2,col,m]of st){if(m===2&&Math.floor(ya/4)%2)continue;const a=pr(s1,ya),b=pr(s2,ya),c=pr(s2,yb),e=pr(s1,yb);if(a&&b&&c&&e)qd(a,b,c,e,col)}}
+const L=[];for(let i=Math.floor((S.y-170)/9);i<=Math.ceil((S.y+20)/9);i++)for(const sd of[-1,1]){const o=scen(i,sd);if(o){const p=pr(o.x,o.y);if(p)L.push({p,o,t:o.b?1:0})}}
+TF.forEach(t=>{const p=pr(t.x,t.y);if(p)L.push({p,t:2,c:t})});L.sort((a,b)=>a.p.k-b.p.k);
+for(const q of L){const{p,o,c}=q,k=p.k;
+ if(q.t===0){X.fillStyle='#3b2a1c';X.fillRect(p.x-.2*k,p.y-1.5*k,.4*k,1.5*k);X.fillStyle='#1f5a2c';X.beginPath();X.arc(p.x,p.y-2.6*k,o.s*k,0,7);X.fill()}
+ else if(q.t===1){X.fillStyle='#4a5362';X.fillRect(p.x-o.s*k/2,p.y-7*k,o.s*k,7*k)}
+ else{X.fillStyle=c.c;X.fillRect(p.x-.95*k,p.y-1.3*k,1.9*k,1.3*k);X.fillStyle='#0b1018';X.fillRect(p.x-.75*k,p.y-1.2*k,1.5*k,.5*k);X.fillStyle=c.d>0?'#ff3030':'#fff6c0';X.fillRect(p.x-.9*k,p.y-.5*k,.4*k,.2*k);X.fillRect(p.x+.5*k,p.y-.5*k,.4*k,.2*k)}}
+X.fillStyle='#0b0f16';X.beginPath();X.moveTo(0,h);X.lineTo(w*.1,h*.86);X.quadraticCurveTo(w/2,h*.8,w*.9,h*.86);X.lineTo(w,h);X.fill();
+X.strokeStyle='#1c8cff';X.lineWidth=2;X.beginPath();X.moveTo(w*.1,h*.86);X.quadraticCurveTo(w/2,h*.8,w*.9,h*.86);X.stroke();
+X.save();X.translate(w/2,h*1.02);X.rotate(S.st*1.6);X.strokeStyle='#14181f';X.lineWidth=h*.035;X.beginPath();X.arc(0,0,h*.22,0,7);X.stroke();X.fillStyle='#14181f';X.fillRect(-h*.22,-h*.02,h*.44,h*.04);X.fillStyle='#1c8cff';X.fillRect(-h*.012,-h*.235,h*.024,h*.03);X.restore()}
+function gauge(cx,cy,r,max,val,step,red,dv){const a0=Math.PI*.75,sw=Math.PI*1.5,A=v=>a0+cl(v/max,0,1)*sw,c=D;
+c.lineWidth=6;c.strokeStyle='#18222f';c.beginPath();c.arc(cx,cy,r-5,a0,a0+sw);c.stroke();
+c.strokeStyle=red&&val>=red?'#ff4040':'#1c8cff';c.beginPath();c.arc(cx,cy,r-5,a0,A(val));c.stroke();
+c.textAlign='center';c.textBaseline='middle';c.font='11px system-ui';
+for(let v=0;v<=max;v+=step/2){const a=A(v),mj=v%step===0,r2=r-(mj?22:17);c.lineWidth=mj?2:1;c.strokeStyle=red&&v>=red?'#ff5a5a':'#93a4bb';c.beginPath();c.moveTo(cx+Math.cos(a)*(r-12),cy+Math.sin(a)*(r-12));c.lineTo(cx+Math.cos(a)*r2,cy+Math.sin(a)*r2);c.stroke();if(mj){c.fillStyle=c.strokeStyle;c.fillText(v/dv,cx+Math.cos(a)*(r-34),cy+Math.sin(a)*(r-34))}}
+const a=A(val);c.strokeStyle='#fff';c.lineWidth=2.5;c.beginPath();c.moveTo(cx-Math.cos(a)*10,cy-Math.sin(a)*10);c.lineTo(cx+Math.cos(a)*(r-16),cy+Math.sin(a)*(r-16));c.stroke();c.fillStyle='#1c8cff';c.beginPath();c.arc(cx,cy,6,0,7);c.fill()}
+function dash(){const c=D,r=S.we*9.549,kmh=Math.abs(S.v)*3.6,wn=S.ov||S.temp>112||S.fuel<5||(S.ign&&!S.run&&!S.crank);
+c.fillStyle='#070a0f';c.fillRect(0,0,640,200);gauge(165,104,90,8000,r,1000,7000,1000);gauge(475,104,90,300,kmh,50,0,1);
+c.textAlign='center';c.fillStyle='#e8eef7';c.font='700 34px system-ui';c.fillText(Math.round(kmh),475,132);c.font='10px system-ui';c.fillStyle='#7f8fa5';c.fillText('km/h',475,152);c.fillText('rpm '+Math.round(r)+' (x1000)',165,152);
+c.fillText('GEAR',320,20);c.font='700 58px system-ui';c.fillStyle=S.gr?'#1c8cff':'#e8eef7';c.fillText(S.gr<0?'R':S.gr||'N',320,64);
+const lamp=(x,t,on,col)=>{c.fillStyle=on?col:'#1b2431';c.beginPath();c.arc(x,112,6,0,7);c.fill();c.fillStyle='#7f8fa5';c.font='9px system-ui';c.fillText(t,x,130)};
+lamp(290,'IGN',S.ign,'#1c8cff');lamp(350,'ENGINE',wn,'#ffb020');
+const bar=(y,t,f,col)=>{c.fillStyle='#7f8fa5';c.font='9px system-ui';c.textAlign='left';c.fillText(t,252,y);c.fillStyle='#18222f';c.fillRect(284,y-4,104,8);c.fillStyle=col;c.fillRect(284,y-4,104*cl(f,0,1),8);c.textAlign='center'};
+bar(158,'FUEL',S.fuel/59,S.fuel<5?'#ff4040':'#1c8cff');bar(178,'TEMP',(S.temp-40)/90,S.temp>112?'#ff4040':'#1c8cff')}
+let kx=80,ky=65;
+function lever(){const c=Z;c.clearRect(0,0,160,130);c.strokeStyle='#27344a';c.lineWidth=10;c.lineCap='round';c.beginPath();c.moveTo(26,65);c.lineTo(134,65);for(const x of[26,62,98,134]){c.moveTo(x,26);c.lineTo(x,x===26?65:104)}c.stroke();
+c.fillStyle='#7f8fa5';c.font='11px system-ui';c.textAlign='center';c.textBaseline='middle';for(const g in SL)if(g!=0)c.fillText(g==-1?'R':g,SL[g][0],SL[g][1]+(SL[g][1]<65?-16:16));
+const t=SL[S.gr];kx=lp(kx,t[0],.25);ky=lp(ky,t[1],.25);c.fillStyle=S.gr?'#1c8cff':'#33415a';c.strokeStyle='#9fb0c6';c.lineWidth=2;c.beginPath();c.arc(kx,ky,12,0,7);c.fill();c.stroke();c.fillStyle='#fff';c.font='700 12px system-ui';c.fillText(S.gr<0?'R':S.gr||'N',kx,ky+1)}
+let lt='';
+function ui(){PD.forEach(p=>{const k=p.dataset.k;p.children[0].style.height=S[k]*100+'%';p.children[2].textContent=Math.round(S[k]*100)+'%'});
+$('bi').classList.toggle('on',!!S.ign);$('bt').classList.toggle('on',!!TR.on);
+const l=TR.on?(TS[TR.i]?`<b>Lesson ${TR.i+1}/${TS.length}: ${TS[TR.i][0]}</b><br>${TS[TR.i][1]}`:'<b>All lessons complete.</b> Free drive!'):'';
+if(l!==lt){lt=l;$('lesson').innerHTML=l;$('lesson').style.display=l?'block':'none'}}
+function rs(){const d=devicePixelRatio||1;W.width=W.clientWidth*d;W.height=W.clientHeight*d}
+new ResizeObserver(rs).observe(W);
+let last=0;
+if(!CanvasRenderingContext2D.prototype.roundRect)CanvasRenderingContext2D.prototype.roundRect=function(x,y,w,h){this.rect(x,y,w,h)};
+function safe(f){try{f()}catch(e){const m=$('msg');m.textContent='Error: '+e.message;m.style.opacity=1;console.error(e)}}
+function loop(t){const dt=Math.min(.033,(t-last)/1000||0);last=t;safe(()=>upd(dt));safe(()=>{if(!W.width||!W.height)rs();X.setTransform(1,0,0,1,0,0);X.clearRect(0,0,W.width,W.height);S.cam?cock():topView()});safe(dash);safe(lever);safe(audUpd);safe(ui);requestAnimationFrame(loop)}
+rs();requestAnimationFrame(loop);
+</script></body></html>
